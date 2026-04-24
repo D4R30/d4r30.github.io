@@ -29,8 +29,6 @@ By accomplishing the second objective, the pointer to an attacker-controlled chu
 
 You can satisfy the first prerequisite by techniques like largebin attack, house of mind (fastbin), fastbin reverse into tcache, or any program-specific form of arbitrary address writing. You don't need full arbitrary value control on the writing address; writing a value higher than 64 is sufficient. 
 
-In the next blog post, I will demonstrate a complete exploit chain using this technique as its base, called *House of Liz*. 
-
 ### Summary
 The core concept of "TCache relative writing" is based on the fact that when the allocator is recording a tcache chunk in `tcache_perthread_struct`, TCache mechanism does not enforce enough check and restraint on the computed tcachebin indice (`tc_idx`), thus WHERE the tcachebin count and head pointer can be written are not restricted by the allocator by any means. The allocator treats extended bin indices as valid in both `tcache_put` and `tcache_get` scenarios. If we're somehow able to write a huge value on one of the fields of `mp_` (`tcache_bins` from [`malloc_par`][malloc_par]), by requesting a chunk size higher than TCache range, we can control the place that a **tcachebin pointer** and **counter** is going to be written. Considering the fact that a `tcache_perthread_struct` is normally placed on heap, one can perform a *TCache relative write* on an arbitrary point located after the tcache metadata chunk (Even on `tcache->entries` list to poison tcache metadata). By writing the new freed tcache chunk's pointer, we can combine this technique with other techniques like tcache poisoning or fastbin corruption and to trigger a heap leak. By writing the new counter, we can poison `tcache->entries`, write arbitrary value into an arbitrary location of heap, with the right amount of mallocs and frees. With all these combined, one is able to create impactful chains of exploits, using this technique as their foundation.
 
@@ -397,7 +395,7 @@ tcache_put (mchunkptr chunk, size_t tc_idx)
 
 If you want to get a chunk from arbitrary location in the latest versions, you can use the overlapping chunk or tcache metadata poisoning tricks I discussed above.
 ### Patch in 2.42 ?
-It seems this technique is (almost) no longer applicable since `GLIBC 2.42`. This is because the TCache mechanism now separates tcache chunks into two kinds: small tcache chunks and large tcache chunks. The large ones (The ones that have a `tc_idx >= 64`) are treated in a different way and there's a second `tc_idx` computed for these kind of tcache chunks, which is done different from the classic `csize2tidx`. See [`large_csize2tidx`][large_csize2tidx].
+It seems this technique is no longer applicable since `GLIBC 2.42`. This is because of the new large chunk management in the TCache mechanism. It now separates tcache chunks into two kinds: small tcache chunks and large tcache chunks. The large ones (The ones that have a `tc_idx >= 64`) are treated in a different way and there's a second `tc_idx` computed for these kind of tcache chunks, which is done different from the classic `csize2tidx`. See [`large_csize2tidx`][large_csize2tidx].
 
 Here's the code tcache code in `__libc_free`:
 
@@ -429,8 +427,6 @@ Here's the code tcache code in `__libc_free`:
     }
 #endif
 {% endhighlight %}
-
-The thing that stops us here is not the fact that large and small tcache chunks are separated, but the third check on large chunks: `tcache->num_slots[tc_idx] != 0`. So if you want to bypass that restriction, you first have to make sure that value of `tcache->num_slots[tc_idx]` will not be zero. In that case, you still have the relative arbitrary write ability. I will extend this part and write about the possible solution to bypass this restriction soon.
 
 
 So that's it guys. Any ideas or errors? You can reach me at: D4R30@protonmail.com
